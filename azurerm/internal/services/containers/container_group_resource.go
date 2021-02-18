@@ -299,12 +299,13 @@ func resourceContainerGroup() *schema.Resource {
 							},
 						},
 
+						// TODO 3.0 - remove this property
 						"volume": {
-							Type:          schema.TypeList,
-							Optional:      true,
-							ForceNew:      true,
-							Deprecated:    "container.*.volume is deprecated. please use container.*.volume_mount and volume",
-							ConflictsWith: []string{"volume_mount"},
+							Type:       schema.TypeList,
+							Optional:   true,
+							Computed:   true,
+							ForceNew:   true,
+							Deprecated: "container.volume is deprecated. please use container.volume_mount and volume",
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"name": {
@@ -399,10 +400,10 @@ func resourceContainerGroup() *schema.Resource {
 						},
 
 						"volume_mount": {
-							Type:          schema.TypeList,
-							Optional:      true,
-							ForceNew:      true,
-							ConflictsWith: []string{"volume"},
+							Type:     schema.TypeList,
+							Optional: true,
+							Computed: true, // TODO 3.0 - remove this field
+							ForceNew: true,
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"volume_name": {
@@ -439,6 +440,7 @@ func resourceContainerGroup() *schema.Resource {
 			"volume": {
 				Type:     schema.TypeList,
 				Optional: true,
+				Computed: true, // TODO 3.0 - remove this field
 				ForceNew: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
@@ -450,12 +452,10 @@ func resourceContainerGroup() *schema.Resource {
 						},
 
 						"azure_file": {
-							Type:          schema.TypeList,
-							Optional:      true,
-							ForceNew:      true,
-							MaxItems:      1,
-							ConflictsWith: []string{"empty_dir", "git_repo", "secret"},
-							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Type:     schema.TypeList,
+							Optional: true,
+							ForceNew: true,
+							MaxItems: 1,
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"share_name": {
@@ -484,21 +484,17 @@ func resourceContainerGroup() *schema.Resource {
 						},
 
 						"empty_dir": {
-							Type:          schema.TypeBool,
-							Optional:      true,
-							ForceNew:      true,
-							Default:       false,
-							ConflictsWith: []string{"azure_file", "git_repo", "secret"},
-							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Type:     schema.TypeBool,
+							Optional: true,
+							ForceNew: true,
+							Default:  false,
 						},
 
 						"git_repo": {
-							Type:          schema.TypeList,
-							Optional:      true,
-							ForceNew:      true,
-							MaxItems:      1,
-							ConflictsWith: []string{"azure_file", "empty_dir", "secret"},
-							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Type:     schema.TypeList,
+							Optional: true,
+							ForceNew: true,
+							MaxItems: 1,
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"url": {
@@ -523,12 +519,10 @@ func resourceContainerGroup() *schema.Resource {
 						},
 
 						"secret": {
-							Type:          schema.TypeMap,
-							ForceNew:      true,
-							Optional:      true,
-							Sensitive:     true,
-							ConflictsWith: []string{"azure_file", "empty_dir", "git_repo"},
-							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Type:      schema.TypeMap,
+							ForceNew:  true,
+							Optional:  true,
+							Sensitive: true,
 							Elem: &schema.Schema{
 								Type: schema.TypeString,
 							},
@@ -798,6 +792,11 @@ func resourceContainerGroupRead(d *schema.ResourceData, meta interface{}) error 
 			return fmt.Errorf("Error setting `container`: %+v", err)
 		}
 
+		volumesConfig := flattenVolumes(props.Volumes)
+		if err := d.Set("volume", volumesConfig); err != nil {
+			return fmt.Errorf("Error setting `volume`: %+v", err)
+		}
+
 		if err := d.Set("image_registry_credential", flattenContainerImageRegistryCredentials(d, props.ImageRegistryCredentials)); err != nil {
 			return fmt.Errorf("Error setting `image_registry_credential`: %+v", err)
 		}
@@ -959,13 +958,24 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 
 		switch {
 		case emptyDir:
+			if gitRepo != nil || secret != nil || azureFile != nil {
+				return nil, nil, nil, fmt.Errorf("only one of `empty_dir` volume, `git_repo` volume, `secret` volume or `azure_file` volume can be specified")
+			}
 			volume.EmptyDir = map[string]string{}
 		case gitRepo != nil:
+			if secret != nil || azureFile != nil {
+				return nil, nil, nil, fmt.Errorf("only one of `empty_dir` volume, `git_repo` volume, `secret` volume or `azure_file` volume can be specified")
+			}
 			volume.GitRepo = gitRepo
 		case secret != nil:
+			if azureFile != nil {
+				return nil, nil, nil, fmt.Errorf("only one of `empty_dir` volume, `git_repo` volume, `secret` volume or `azure_file` volume can be specified")
+			}
 			volume.Secret = secret
-		default:
+		case azureFile != nil:
 			volume.AzureFile = azureFile
+		default:
+			break
 		}
 
 		containerGroupVolumes = append(containerGroupVolumes, volume)
@@ -1058,17 +1068,6 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 		}
 
 		volumeMounts := make([]containerinstance.VolumeMount, 0)
-		// Deprecated volume property
-		if v, ok := data["volume"]; ok {
-			tempVolumeMounts, containerGroupVolumesPartial, err := expandContainerVolumes(v)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			volumeMounts = append(volumeMounts, *tempVolumeMounts...)
-			if containerGroupVolumesPartial != nil {
-				containerGroupVolumes = append(containerGroupVolumes, *containerGroupVolumesPartial...)
-			}
-		}
 		volumeMountsConfig := d.Get("volume_mount").([]interface{})
 		for _, volumeMountConfig := range volumeMountsConfig {
 			vm := expandVolumeMount(volumeMountConfig.(map[string]interface{}))
@@ -1077,6 +1076,21 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 			}
 		}
 		container.VolumeMounts = &volumeMounts
+
+		// Deprecated volume property
+		if v, ok := data["volume"]; ok {
+			if len(containerGroupVolumes) > 0 || len(volumeMounts) > 0 {
+				return nil, nil, nil, fmt.Errorf("Container volume property cannot be used with container group volume or container volume mounts property. Please use only of one of them")
+			}
+			volumeMountsPartial, containerGroupVolumesPartial, err := expandDeprecatedContainerVolumes(v)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			container.VolumeMounts = volumeMountsPartial
+			if containerGroupVolumesPartial != nil {
+				containerGroupVolumes = append(containerGroupVolumes, *containerGroupVolumesPartial...)
+			}
+		}
 
 		if v, ok := data["liveness_probe"]; ok {
 			container.ContainerProperties.LivenessProbe = expandContainerProbe(v)
@@ -1164,7 +1178,7 @@ func expandContainerImageRegistryCredentials(d *schema.ResourceData) *[]containe
 	return &output
 }
 
-func expandContainerVolumes(input interface{}) (*[]containerinstance.VolumeMount, *[]containerinstance.Volume, error) {
+func expandDeprecatedContainerVolumes(input interface{}) (*[]containerinstance.VolumeMount, *[]containerinstance.Volume, error) {
 	volumesRaw := input.([]interface{})
 
 	if len(volumesRaw) == 0 {
@@ -1508,7 +1522,7 @@ func flattenContainerGroupContainers(d *schema.ResourceData, containers *[]conta
 					}
 				}
 			}
-			containerConfig["volume"] = flattenContainerVolumes(container.VolumeMounts, containerGroupVolumes, containerVolumesConfig)
+			containerConfig["volume"] = flattenDeprecatedContainerVolumes(container.VolumeMounts, containerGroupVolumes, containerVolumesConfig)
 		}
 
 		containerConfig["liveness_probe"] = flattenContainerProbes(container.LivenessProbe)
@@ -1546,7 +1560,7 @@ func flattenContainerEnvironmentVariables(input *[]containerinstance.Environment
 	return output
 }
 
-func flattenContainerVolumes(volumeMounts *[]containerinstance.VolumeMount, containerGroupVolumes *[]containerinstance.Volume, containerVolumesConfig *[]interface{}) []interface{} {
+func flattenDeprecatedContainerVolumes(volumeMounts *[]containerinstance.VolumeMount, containerGroupVolumes *[]containerinstance.Volume, containerVolumesConfig *[]interface{}) []interface{} {
 	volumeConfigs := make([]interface{}, 0)
 
 	if volumeMounts == nil {
@@ -1613,6 +1627,48 @@ func flattenContainerVolumes(volumeMounts *[]containerinstance.VolumeMount, cont
 	return volumeConfigs
 }
 
+func flattenVolumes(volumes *[]containerinstance.Volume) []interface{} {
+	volumesConfig := make([]interface{}, 0)
+
+	if volumes == nil {
+		return volumesConfig
+	}
+
+	for _, volume := range *volumes {
+		volumeConfig := make(map[string]interface{})
+
+		switch {
+		case volume.EmptyDir != nil:
+			volumeConfig["empty_dir"] = true
+		case volume.GitRepo != nil:
+			volumeConfig["git_repo"] = flattenGitRepoVolume(volume.GitRepo)
+		case volume.Secret != nil:
+			// volumeConfig["secret"] = nil // TODO
+			break
+		default:
+			volumeConfig["azure_file"] = flattenAzureFileVolume(volume.AzureFile)
+		}
+
+		// // find corresponding volume in config
+		// // and use the data
+		// if containerVolumesConfig != nil {
+		// 	for _, cvr := range *containerVolumesConfig {
+		// 		cv := cvr.(map[string]interface{})
+		// 		rawName := cv["name"].(string)
+		// 		if vm.Name != nil && *vm.Name == rawName {
+		// 			storageAccountKey := cv["storage_account_key"].(string)
+		// 			volumeConfig["storage_account_key"] = storageAccountKey
+		// 			volumeConfig["secret"] = cv["secret"]
+		// 		}
+		// 	}
+		// }
+
+		volumesConfig = append(volumesConfig, volumeConfig)
+	}
+
+	return volumesConfig
+}
+
 func flattenGitRepoVolume(input *containerinstance.GitRepoVolume) []interface{} {
 	if input == nil {
 		return []interface{}{}
@@ -1632,6 +1688,29 @@ func flattenGitRepoVolume(input *containerinstance.GitRepoVolume) []interface{} 
 			"url":       repository,
 			"directory": directory,
 			"revision":  revision,
+		},
+	}
+}
+
+func flattenAzureFileVolume(input *containerinstance.AzureFileVolume) []interface{} {
+	if input == nil {
+		return []interface{}{}
+	}
+	var shareName, accountName, accountKey string
+	if input.ShareName != nil {
+		shareName = *input.ShareName
+	}
+	if input.StorageAccountName != nil {
+		accountName = *input.StorageAccountName
+	}
+	if input.StorageAccountKey != nil {
+		accountKey = *input.StorageAccountKey
+	}
+	return []interface{}{
+		map[string]interface{}{
+			"share_name":           shareName,
+			"storage_account_name": accountName,
+			"storage_account_key":  accountKey,
 		},
 	}
 }
