@@ -429,7 +429,7 @@ func TestAccContainerGroup_azureFileVolumeDeprecated(t *testing.T) {
 				check.That(data.ResourceName).ExistsInAzure(r),
 			),
 		},
-		data.ImportStep(),
+		data.ImportStep("container.0.volume.0.storage_account_key"),
 	})
 }
 
@@ -489,7 +489,7 @@ func TestAccContainerGroup_azureFileVolume(t *testing.T) {
 				check.That(data.ResourceName).ExistsInAzure(r),
 			),
 		},
-		data.ImportStep(),
+		data.ImportStep("volume.0.azure_file.0.storage_account_key"),
 	})
 }
 
@@ -534,7 +534,7 @@ func TestAccContainerGroup_secretVolume(t *testing.T) {
 				check.That(data.ResourceName).ExistsInAzure(r),
 			),
 		},
-		data.ImportStep("container.0.volume.0.secret"),
+		data.ImportStep("volume.0.secret"),
 	})
 }
 

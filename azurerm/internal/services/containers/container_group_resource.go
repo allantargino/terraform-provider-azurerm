@@ -975,7 +975,7 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 		case azureFile != nil:
 			volume.AzureFile = azureFile
 		default:
-			break
+			return nil, nil, nil, fmt.Errorf("at least one of `empty_dir` volume, `git_repo` volume, `secret` volume or `azure_file` volume must be specified")
 		}
 
 		containerGroupVolumes = append(containerGroupVolumes, volume)
@@ -1068,8 +1068,9 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 		}
 
 		volumeMounts := make([]containerinstance.VolumeMount, 0)
-		if volumeMountsConfig, ok := d.GetOk("volume_mount"); ok {
-			for _, volumeMountConfig := range volumeMountsConfig.([]interface{}) {
+		if v, ok := data["volume_mount"]; ok {
+			volumeMountsConfig := v.([]interface{})
+			for _, volumeMountConfig := range volumeMountsConfig {
 				vm := expandVolumeMount(volumeMountConfig.(map[string]interface{}))
 				if vm != nil {
 					volumeMounts = append(volumeMounts, *vm)
@@ -1651,25 +1652,12 @@ func flattenVolumes(volumes *[]containerinstance.Volume) []interface{} {
 		case volume.GitRepo != nil:
 			volumeConfig["git_repo"] = flattenGitRepoVolume(volume.GitRepo)
 		case volume.Secret != nil:
-			// volumeConfig["secret"] = nil // TODO
-			break
-		default:
+			break // Not returned by API
+		case volume.AzureFile != nil:
 			volumeConfig["azure_file"] = flattenAzureFileVolume(volume.AzureFile)
+		default:
+			break
 		}
-
-		// // find corresponding volume in config
-		// // and use the data
-		// if containerVolumesConfig != nil {
-		// 	for _, cvr := range *containerVolumesConfig {
-		// 		cv := cvr.(map[string]interface{})
-		// 		rawName := cv["name"].(string)
-		// 		if vm.Name != nil && *vm.Name == rawName {
-		// 			storageAccountKey := cv["storage_account_key"].(string)
-		// 			volumeConfig["storage_account_key"] = storageAccountKey
-		// 			volumeConfig["secret"] = cv["secret"]
-		// 		}
-		// 	}
-		// }
 
 		volumesConfig = append(volumesConfig, volumeConfig)
 	}
@@ -1733,7 +1721,7 @@ func flattenContainerVolumeMounts(volumeMounts *[]containerinstance.VolumeMount)
 	for _, vm := range *volumeMounts {
 		volumeConfig := make(map[string]interface{})
 		if vm.Name != nil {
-			volumeConfig["name"] = *vm.Name
+			volumeConfig["volume_name"] = *vm.Name
 		}
 		if vm.MountPath != nil {
 			volumeConfig["mount_path"] = *vm.MountPath
