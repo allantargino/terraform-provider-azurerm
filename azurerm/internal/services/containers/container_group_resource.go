@@ -300,9 +300,11 @@ func resourceContainerGroup() *schema.Resource {
 						},
 
 						"volume": {
-							Type:     schema.TypeList,
-							Optional: true,
-							ForceNew: true,
+							Type:          schema.TypeList,
+							Optional:      true,
+							ForceNew:      true,
+							Deprecated:    "container.*.volume is deprecated. please use container.*.volume_mount and volume",
+							ConflictsWith: []string{"volume_mount"},
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"name": {
@@ -396,9 +398,141 @@ func resourceContainerGroup() *schema.Resource {
 							},
 						},
 
+						"volume_mount": {
+							Type:          schema.TypeList,
+							Optional:      true,
+							ForceNew:      true,
+							ConflictsWith: []string{"volume"},
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"volume_name": {
+										Type:         schema.TypeString,
+										Required:     true,
+										ForceNew:     true,
+										ValidateFunc: validation.StringIsNotEmpty,
+									},
+
+									"mount_path": {
+										Type:         schema.TypeString,
+										Required:     true,
+										ForceNew:     true,
+										ValidateFunc: validation.StringIsNotEmpty,
+									},
+
+									"read_only": {
+										Type:     schema.TypeBool,
+										Optional: true,
+										ForceNew: true,
+										Default:  false,
+									},
+								},
+							},
+						},
+
 						"liveness_probe": SchemaContainerGroupProbe(),
 
 						"readiness_probe": SchemaContainerGroupProbe(),
+					},
+				},
+			},
+
+			"volume": {
+				Type:     schema.TypeList,
+				Optional: true,
+				ForceNew: true,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"name": {
+							Type:         schema.TypeString,
+							Required:     true,
+							ForceNew:     true,
+							ValidateFunc: validation.StringIsNotEmpty,
+						},
+
+						"azure_file": {
+							Type:          schema.TypeList,
+							Optional:      true,
+							ForceNew:      true,
+							MaxItems:      1,
+							ConflictsWith: []string{"empty_dir", "git_repo", "secret"},
+							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"share_name": {
+										Type:         schema.TypeString,
+										Required:     true,
+										ForceNew:     true,
+										ValidateFunc: validation.StringIsNotEmpty,
+									},
+
+									"storage_account_name": {
+										Type:         schema.TypeString,
+										Required:     true,
+										ForceNew:     true,
+										ValidateFunc: validation.StringIsNotEmpty,
+									},
+
+									"storage_account_key": {
+										Type:         schema.TypeString,
+										Required:     true,
+										Sensitive:    true,
+										ForceNew:     true,
+										ValidateFunc: validation.StringIsNotEmpty,
+									},
+								},
+							},
+						},
+
+						"empty_dir": {
+							Type:          schema.TypeBool,
+							Optional:      true,
+							ForceNew:      true,
+							Default:       false,
+							ConflictsWith: []string{"azure_file", "git_repo", "secret"},
+							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+						},
+
+						"git_repo": {
+							Type:          schema.TypeList,
+							Optional:      true,
+							ForceNew:      true,
+							MaxItems:      1,
+							ConflictsWith: []string{"azure_file", "empty_dir", "secret"},
+							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Elem: &schema.Resource{
+								Schema: map[string]*schema.Schema{
+									"url": {
+										Type:     schema.TypeString,
+										Required: true,
+										ForceNew: true,
+									},
+
+									"directory": {
+										Type:     schema.TypeString,
+										Optional: true,
+										ForceNew: true,
+									},
+
+									"revision": {
+										Type:     schema.TypeString,
+										Optional: true,
+										ForceNew: true,
+									},
+								},
+							},
+						},
+
+						"secret": {
+							Type:          schema.TypeMap,
+							ForceNew:      true,
+							Optional:      true,
+							Sensitive:     true,
+							ConflictsWith: []string{"azure_file", "empty_dir", "git_repo"},
+							ExactlyOneOf:  []string{"azure_file", "empty_dir", "git_repo", "secret"},
+							Elem: &schema.Schema{
+								Type: schema.TypeString,
+							},
+						},
 					},
 				},
 			},
@@ -804,10 +938,38 @@ func containerGroupEnsureDetachedFromNetworkProfileRefreshFunc(ctx context.Conte
 }
 
 func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstance.Container, *[]containerinstance.Port, *[]containerinstance.Volume, error) {
+	volumesConfig := d.Get("volume").([]interface{})
 	containersConfig := d.Get("container").([]interface{})
+
 	containers := make([]containerinstance.Container, 0)
 	containerGroupPorts := make([]containerinstance.Port, 0)
 	containerGroupVolumes := make([]containerinstance.Volume, 0)
+
+	for _, volumeConfig := range volumesConfig {
+		data := volumeConfig.(map[string]interface{})
+
+		volume := containerinstance.Volume{
+			Name: utils.String(data["name"].(string)),
+		}
+
+		emptyDir := data["empty_dir"].(bool)
+		gitRepo := expandGitRepoVolume(data["git_repo"].([]interface{}))
+		secret := expandSecrets(data["secret"].(map[string]interface{}))
+		azureFile := expandAzureFileVolume(data["azure_file"].([]interface{}))
+
+		switch {
+		case emptyDir:
+			volume.EmptyDir = map[string]string{}
+		case gitRepo != nil:
+			volume.GitRepo = gitRepo
+		case secret != nil:
+			volume.Secret = secret
+		default:
+			volume.AzureFile = azureFile
+		}
+
+		containerGroupVolumes = append(containerGroupVolumes, volume)
+	}
 
 	for _, containerConfig := range containersConfig {
 		data := containerConfig.(map[string]interface{})
@@ -895,16 +1057,26 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 			container.Command = &command
 		}
 
+		volumeMounts := make([]containerinstance.VolumeMount, 0)
+		// Deprecated volume property
 		if v, ok := data["volume"]; ok {
-			volumeMounts, containerGroupVolumesPartial, err := expandContainerVolumes(v)
+			tempVolumeMounts, containerGroupVolumesPartial, err := expandContainerVolumes(v)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			container.VolumeMounts = volumeMounts
+			volumeMounts = append(volumeMounts, *tempVolumeMounts...)
 			if containerGroupVolumesPartial != nil {
 				containerGroupVolumes = append(containerGroupVolumes, *containerGroupVolumesPartial...)
 			}
 		}
+		volumeMountsConfig := d.Get("volume_mount").([]interface{})
+		for _, volumeMountConfig := range volumeMountsConfig {
+			vm := expandVolumeMount(volumeMountConfig.(map[string]interface{}))
+			if vm != nil {
+				volumeMounts = append(volumeMounts, *vm)
+			}
+		}
+		container.VolumeMounts = &volumeMounts
 
 		if v, ok := data["liveness_probe"]; ok {
 			container.ContainerProperties.LivenessProbe = expandContainerProbe(v)
@@ -1093,6 +1265,31 @@ func expandSecrets(secretsMap map[string]interface{}) map[string]*string {
 	}
 
 	return output
+}
+
+func expandAzureFileVolume(input []interface{}) *containerinstance.AzureFileVolume {
+	if len(input) == 0 || input[0] == nil {
+		return nil
+	}
+	v := input[0].(map[string]interface{})
+
+	return &containerinstance.AzureFileVolume{
+		ShareName:          utils.String(v["share_name"].(string)),
+		StorageAccountName: utils.String(v["storage_account_name"].(string)),
+		StorageAccountKey:  utils.String(v["storage_account_key"].(string)),
+	}
+}
+
+func expandVolumeMount(v map[string]interface{}) *containerinstance.VolumeMount {
+	if len(v) == 0 {
+		return nil
+	}
+
+	return &containerinstance.VolumeMount{
+		Name:      utils.String(v["volume_name"].(string)),
+		MountPath: utils.String(v["mount_path"].(string)),
+		ReadOnly:  utils.Bool(v["read_only"].(bool)),
+	}
 }
 
 func expandContainerProbe(input interface{}) *containerinstance.ContainerProbe {
