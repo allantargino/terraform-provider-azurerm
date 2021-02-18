@@ -1068,26 +1068,27 @@ func expandContainerGroupContainers(d *schema.ResourceData) (*[]containerinstanc
 		}
 
 		volumeMounts := make([]containerinstance.VolumeMount, 0)
-		volumeMountsConfig := d.Get("volume_mount").([]interface{})
-		for _, volumeMountConfig := range volumeMountsConfig {
-			vm := expandVolumeMount(volumeMountConfig.(map[string]interface{}))
-			if vm != nil {
-				volumeMounts = append(volumeMounts, *vm)
+		if volumeMountsConfig, ok := d.GetOk("volume_mount"); ok {
+			for _, volumeMountConfig := range volumeMountsConfig.([]interface{}) {
+				vm := expandVolumeMount(volumeMountConfig.(map[string]interface{}))
+				if vm != nil {
+					volumeMounts = append(volumeMounts, *vm)
+				}
 			}
+			container.VolumeMounts = &volumeMounts
 		}
-		container.VolumeMounts = &volumeMounts
 
 		// Deprecated volume property
 		if v, ok := data["volume"]; ok {
-			if len(containerGroupVolumes) > 0 || len(volumeMounts) > 0 {
-				return nil, nil, nil, fmt.Errorf("Container volume property cannot be used with container group volume or container volume mounts property. Please use only of one of them")
-			}
 			volumeMountsPartial, containerGroupVolumesPartial, err := expandDeprecatedContainerVolumes(v)
 			if err != nil {
 				return nil, nil, nil, err
 			}
-			container.VolumeMounts = volumeMountsPartial
-			if containerGroupVolumesPartial != nil {
+			if volumeMountsPartial != nil && containerGroupVolumesPartial != nil {
+				if len(*containerGroupVolumesPartial) > 0 && (len(containerGroupVolumes) > 0 || len(volumeMounts) > 0) {
+					return nil, nil, nil, fmt.Errorf("Container volume property cannot be used with container group volume or container volume mounts property. Please use only of one of them")
+				}
+				container.VolumeMounts = volumeMountsPartial
 				containerGroupVolumes = append(containerGroupVolumes, *containerGroupVolumesPartial...)
 			}
 		}
@@ -1506,6 +1507,9 @@ func flattenContainerGroupContainers(d *schema.ResourceData, containers *[]conta
 		}
 		containerConfig["commands"] = commands
 
+		containerConfig["volume_mount"] = flattenContainerVolumeMounts(container.VolumeMounts)
+
+		// Deprecated Property
 		if containerGroupVolumes != nil && container.VolumeMounts != nil {
 			// Also pass in the container volume config from schema
 			var containerVolumesConfig *[]interface{}
@@ -1637,6 +1641,10 @@ func flattenVolumes(volumes *[]containerinstance.Volume) []interface{} {
 	for _, volume := range *volumes {
 		volumeConfig := make(map[string]interface{})
 
+		if name := volume.Name; name != nil {
+			volumeConfig["name"] = name
+		}
+
 		switch {
 		case volume.EmptyDir != nil:
 			volumeConfig["empty_dir"] = true
@@ -1713,6 +1721,31 @@ func flattenAzureFileVolume(input *containerinstance.AzureFileVolume) []interfac
 			"storage_account_key":  accountKey,
 		},
 	}
+}
+
+func flattenContainerVolumeMounts(volumeMounts *[]containerinstance.VolumeMount) []interface{} {
+	volumeMountsConfig := make([]interface{}, 0)
+
+	if volumeMounts == nil {
+		return volumeMountsConfig
+	}
+
+	for _, vm := range *volumeMounts {
+		volumeConfig := make(map[string]interface{})
+		if vm.Name != nil {
+			volumeConfig["name"] = *vm.Name
+		}
+		if vm.MountPath != nil {
+			volumeConfig["mount_path"] = *vm.MountPath
+		}
+		if vm.ReadOnly != nil {
+			volumeConfig["read_only"] = *vm.ReadOnly
+		}
+
+		volumeMountsConfig = append(volumeMountsConfig, volumeConfig)
+	}
+
+	return volumeMountsConfig
 }
 
 func flattenContainerProbes(input *containerinstance.ContainerProbe) []interface{} {
